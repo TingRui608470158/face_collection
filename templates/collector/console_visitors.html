@@ -1,0 +1,52 @@
+{% extends 'base_app.html' %}
+{% block title %}訪客管理{% endblock %}
+{% block head_extra %}
+  <style>
+    table { width:100%; border-collapse: collapse; }
+    th, td { padding:10px 12px; border-bottom:1px solid #eee; text-align:left; }
+    th { background:#fafafa; }
+  </style>
+{% endblock %}
+{% block content %}
+    {% with active_tab='visitors' %}{% endwith %}
+    <div class="card"><div class="card-body">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h2 class="h5 m-0">訪客列表</h2>
+        <span class="text-muted">共 {{ data.total|default:0 }} 筆</span>
+        <a class="btn btn-outline-secondary ms-auto" href="{% url 'name_role_form' %}">返回作業</a>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead class="table-light">
+            <tr>
+              <th>識別碼</th>
+              <th>姓名</th>
+              <th>狀態</th>
+              <th>建立時間</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for it in data.items %}
+            <tr>
+              <td>{{ it.index }}</td>
+              <td>{{ it.name }}</td>
+              <td>{{ it.register_status }}</td>
+              <td>{{ it.created_at }}</td>
+              <td>
+                <form method="post" action="{% url 'console_visitor_delete' it.index %}" onsubmit="return confirm('確認刪除訪客 '+(this.dataset.n||'')+'?');" data-n="{{ it.name }}">
+                  {% csrf_token %}
+                  <button class="btn btn-outline-danger btn-sm" type="submit">刪除</button>
+                </form>
+              </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5" class="text-muted">目前沒有資料</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div></div>
+{% endblock %}
+
+

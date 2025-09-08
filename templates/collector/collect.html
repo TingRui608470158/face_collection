@@ -1,0 +1,142 @@
+{% extends 'base_app.html' %}
+{% block title %}收集影像{% endblock %}
+{% block content %}
+  {% with active_tab='collect' %}{% endwith %}
+  <div class="row g-3">
+    <div class="col-12 col-xl-8 col-lg-7">
+      <div class="card h-100"><div class="card-body">
+        <h2 class="h5">收集影像：{{ profile.name }} ({{ profile.get_role_display }})</h2>
+        <p class="text-muted mb-2">步驟：1) 點「開始收集」→ 2) 看鏡頭保持3種角度與表情 → 3) 收集完成後點「下一步」選代表照。</p>
+        <p class="text-muted">提示：請正對鏡頭，頭部微轉左、中、右，各自然眨眼、微笑，保持畫面明亮。</p>
+        <div class="ratio ratio-4x3 mb-2" style="max-width: 640px;">
+          <video id="video" class="w-100 h-100" autoplay playsinline></video>
+        </div>
+        <canvas id="canvas" style="display:none"></canvas>
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <button id="start" class="btn btn-primary">開始收集（約 5 秒）</button>
+          <a id="back" class="btn btn-outline-secondary" href="{% url 'name_role_form' %}">上一步</a>
+          <a id="next" class="btn btn-success" href="{% url 'select_image' %}" disabled>下一步</a>
+          <span id="countdown" class="text-muted ms-auto">尚未開始</span>
+        </div>
+        <div class="progress" role="progressbar" aria-label="收集進度" aria-valuemin="0" aria-valuemax="100">
+          <div id="bar" class="progress-bar" style="width: 0%"></div>
+        </div>
+        <div class="mt-1">進度：<span id="progress">0</span>/10</div>
+      </div></div>
+    </div>
+    <div class="col-12 col-xl-4 col-lg-5">
+      <div class="card h-100"><div class="card-body">
+        <h3 class="h6">預覽</h3>
+        <div id="thumbs" class="row row-cols-2 row-cols-md-3 g-2"></div>
+      </div></div>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const startBtn = document.getElementById('start');
+    const nextLink = document.getElementById('next');
+    const thumbs = document.getElementById('thumbs');
+    const progress = document.getElementById('progress');
+
+    let stream = null;
+    let timer = null;
+    let frames = 0;
+    let secondsLeft = 5;
+
+    function isSecure() {
+      if (window.isSecureContext) return true;
+      const host = location.hostname;
+      return location.protocol === 'https:' || host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+    }
+    function ensureGetUserMedia() {
+      if (!navigator.mediaDevices) navigator.mediaDevices = {};
+      if (!navigator.mediaDevices.getUserMedia) {
+        const legacy = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.getUserMedia;
+        if (!legacy) return false;
+        navigator.mediaDevices.getUserMedia = (c) => new Promise((res, rej) => legacy.call(navigator, c, res, rej));
+      }
+      return true;
+    }
+
+    async function startCamera() {
+      if (!isSecure()) { alert('需要 HTTPS 或 localhost'); throw new Error('insecure'); }
+      if (!ensureGetUserMedia()) { alert('瀏覽器不支援攝影機'); throw new Error('unsupported'); }
+      if (stream) return;
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+    }
+    async function stopCamera() {
+      if (!stream) return;
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+    }
+
+    function dataURLFromVideo() {
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', 0.9);
+    }
+
+    const STORAGE_KEY = 'collector:frames';
+    function saveFramesToSession(images) {
+      try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(images)); } catch (e) { console.error(e); }
+    }
+
+    async function beginCollect() {
+      frames = 0;
+      thumbs.innerHTML = '';
+      progress.textContent = '0';
+      nextLink.setAttribute('disabled','disabled');
+      await startCamera();
+      secondsLeft = 5;
+      const bar = document.getElementById('bar');
+      const countdown = document.getElementById('countdown');
+      countdown.textContent = `剩餘 ${secondsLeft} 秒`;
+      timer = setInterval(async () => {
+        try {
+          const dataURL = dataURLFromVideo();
+          frames += 1;
+          progress.textContent = String(frames);
+          const col = document.createElement('div');
+          col.className = 'col';
+          const img = document.createElement('img');
+          img.src = dataURL; img.className = 'img-fluid rounded';
+          col.appendChild(img);
+          thumbs.appendChild(col);
+          const arr = Array.from(thumbs.querySelectorAll('img')).map(i => i.src).slice(-10);
+          saveFramesToSession(arr);
+          const pct = Math.min(100, Math.round(frames * 10));
+          bar.style.width = pct + '%';
+          if (frames % 2 === 0 && secondsLeft > 0) {
+            secondsLeft -= 1;
+            countdown.textContent = secondsLeft > 0 ? `剩餘 ${secondsLeft} 秒` : '完成';
+          }
+          if (frames >= 10) {
+            clearInterval(timer); timer = null;
+            await stopCamera();
+            nextLink.removeAttribute('disabled');
+            startBtn.disabled = false;
+          }
+        } catch (e) { console.error(e); }
+      }, 500);
+    }
+
+    startBtn.addEventListener('click', async () => {
+      if (timer) return;
+      startBtn.disabled = true;
+      startBtn.style.display = 'none';
+      nextLink.setAttribute('disabled','disabled');
+      try { await beginCollect(); } finally {}
+    });
+    window.addEventListener('beforeunload', () => { if (timer) clearInterval(timer); });
+  </script>
+{% endblock %}
+
+

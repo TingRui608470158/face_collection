@@ -1,0 +1,45 @@
+{% extends 'base_app.html' %}
+{% block title %}員工管理{% endblock %}
+{% block content %}
+    {% with active_tab='employees' %}{% endwith %}
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <h2 class="h5 m-0">員工列表</h2>
+          <span class="text-muted">共 {{ data.total|default:0 }} 筆</span>
+          <a class="btn btn-outline-secondary ms-auto" href="{% url 'name_role_form' %}">返回作業</a>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>員工編號</th>
+                <th>姓名</th>
+                <th>建立時間</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for it in data.items %}
+              <tr>
+                <td>{{ it.employee_id }}</td>
+                <td>{{ it.name }}</td>
+                <td>{{ it.created_at }}</td>
+                <td>
+                  <form method="post" action="{% url 'console_employee_delete' it.employee_id %}" onsubmit="return confirm('確認刪除員工 '+(this.dataset.n||'')+'?');" data-n="{{ it.name }}">
+                    {% csrf_token %}
+                    <button class="btn btn-outline-danger btn-sm" type="submit">刪除</button>
+                  </form>
+                </td>
+              </tr>
+              {% empty %}
+              <tr><td colspan="4" class="text-muted">目前沒有資料</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+{% endblock %}
+
+

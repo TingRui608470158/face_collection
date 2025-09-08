@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>人臉影像收集</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; }
+      .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+      video { width: 480px; max-width: 100%; border-radius: 8px; background: #000; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; max-width: 520px; }
+      .controls { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+      .muted { color: #666; font-size: 14px; }
+      .counter { font-weight: bold; }
+      input[type="text"] { padding: 8px 10px; border: 1px solid #bbb; border-radius: 6px; }
+      button { padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #111; color: #fff; cursor: pointer; }
+      button.secondary { background: #f5f5f5; color: #111; border-color: #ccc; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <h2>人臉影像收集</h2>
+    <div class="row">
+      <div class="card">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas" style="display:none"></canvas>
+        <div class="controls">
+          <input id="label" type="text" placeholder="輸入姓名或標籤，例如: Ray" />
+          <button id="start">開始收集</button>
+          <button id="stop" class="secondary" disabled>停止</button>
+        </div>
+        <div class="muted">授權瀏覽器存取攝影機，系統將每 500ms 擷取一張上傳。</div>
+        <div>標籤 <span id="labelDisplay" class="counter">unknown</span> 已收集：<span id="count" class="counter">0</span></div>
+      </div>
+      <div class="card">
+        <h3>現有標籤</h3>
+        <div id="labels" class="grid"></div>
+      </div>
+    </div>
+
+    <script>
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const startBtn = document.getElementById('start');
+      const stopBtn = document.getElementById('stop');
+      const labelInput = document.getElementById('label');
+      const labelDisplay = document.getElementById('labelDisplay');
+      const countEl = document.getElementById('count');
+      const labelsEl = document.getElementById('labels');
+
+      let stream = null;
+      let timer = null;
+
+      function isSecure() {
+        if (window.isSecureContext) return true;
+        const host = location.hostname;
+        return location.protocol === 'https:' || host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+      }
+
+      function ensureGetUserMedia() {
+        if (!navigator.mediaDevices) {
+          navigator.mediaDevices = {};
+        }
+        if (!navigator.mediaDevices.getUserMedia) {
+          const legacy = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.getUserMedia;
+          if (!legacy) return false;
+          navigator.mediaDevices.getUserMedia = (constraints) => new Promise((resolve, reject) => legacy.call(navigator, constraints, resolve, reject));
+        }
+        return true;
+      }
+
+      async function refreshLabels() {
+        try {
+          const res = await fetch('/labels');
+          const data = await res.json();
+          labelsEl.innerHTML = '';
+          (data.labels || []).forEach((name) => {
+            const div = document.createElement('div');
+            div.textContent = name;
+            div.style.border = '1px solid #eee';
+            div.style.borderRadius = '6px';
+            div.style.padding = '8px 10px';
+            labelsEl.appendChild(div);
+          });
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      async function refreshCount(label) {
+        if (!label) return;
+        try {
+          const res = await fetch('/count?label=' + encodeURIComponent(label));
+          const data = await res.json();
+          countEl.textContent = data[label] ?? 0;
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      async function startCamera() {
+        if (stream) return;
+        if (!isSecure()) {
+          alert('當前非安全環境(需要 HTTPS 或 localhost)，瀏覽器可能封鎖攝影機。請改用 https 網址或透過 SSH 轉發/反向代理。');
+          throw new Error('Insecure context');
+        }
+        if (!ensureGetUserMedia()) {
+          alert('此瀏覽器不支援攝影機 API。請更新或改用 Chrome/Edge/Firefox。');
+          throw new Error('getUserMedia unsupported');
+        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+      }
+
+      async function stopCamera() {
+        if (!stream) return;
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        video.srcObject = null;
+      }
+
+      async function captureAndUpload() {
+        const label = (labelInput.value || 'unknown').trim() || 'unknown';
+        labelDisplay.textContent = label;
+
+        const width = video.videoWidth || 640;
+        const height = video.videoHeight || 480;
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, width, height);
+
+        canvas.toBlob(async (blob) => {
+          if (!blob) return;
+          const formData = new FormData();
+          formData.append('file', blob, 'frame.jpg');
+          try {
+            const res = await fetch('/upload?label=' + encodeURIComponent(label), {
+              method: 'POST',
+              body: formData,
+            });
+            await res.json();
+            refreshCount(label);
+            refreshLabels();
+          } catch (e) {
+            console.error(e);
+          }
+        }, 'image/jpeg', 0.85);
+      }
+
+      startBtn.addEventListener('click', async () => {
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        try {
+          await startCamera();
+          const label = (labelInput.value || 'unknown').trim() || 'unknown';
+          await refreshCount(label);
+          timer = setInterval(captureAndUpload, 500);
+        } catch (e) {
+          console.error(e);
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        }
+      });
+
+      stopBtn.addEventListener('click', async () => {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        if (timer) clearInterval(timer);
+        timer = null;
+        await stopCamera();
+      });
+
+      window.addEventListener('load', () => {
+        refreshLabels();
+      });
+    </script>
+  </body>
+  </html>
+
+

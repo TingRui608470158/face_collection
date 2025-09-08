@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    {% load static %}
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>選擇代表照片</title>
+    <link rel="stylesheet" href="{% static 'assets/app.css' %}?v=2" />
+  </head>
+  <body>
+    <header class="app-header">
+      <img src="{% static 'assets/logo.png' %}?v={{ STATIC_VERSION }}" alt="SYNCROBOTIC" />
+      <strong>選擇代表照片</strong>
+      <form action="{% url 'logout' %}" method="post" class="align-right">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-secondary">登出</button>
+      </form>
+    </header>
+    <div class="steps">
+      <div class="container">
+        <ol>
+          <li>輸入</li>
+          <li>收集</li>
+          <li class="active">選擇</li>
+          <li>完成</li>
+        </ol>
+      </div>
+    </div>
+    <main class="container">
+      <div class="card">
+        <h2>選擇 1 張代表照片：{{ profile.name }}</h2>
+        <form id="selectForm">
+          <div id="grid" class="grid-5"></div>
+          <div class="actions" style="margin-top:14px;display:flex;gap:12px;">
+            <button type="submit" class="btn">完成</button>
+            <a href="{% url 'collect' %}" class="btn btn-secondary">返回收集</a>
+          </div>
+        </form>
+      </div>
+    </main>
+    <script>
+      const STORAGE_KEY = 'collector:frames';
+      function getCookie(name) {
+        const v = `; ${document.cookie}`;
+        const parts = v.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
+      }
+      function loadFrames() {
+        try {
+          const raw = sessionStorage.getItem(STORAGE_KEY) || '[]';
+          const arr = JSON.parse(raw);
+          return Array.isArray(arr) ? arr : [];
+        } catch (e) { console.error(e); return []; }
+      }
+      function renderGrid(images) {
+        const grid = document.getElementById('grid');
+        grid.innerHTML = '';
+        images.forEach((src, idx) => {
+          const id = `img_${idx}`;
+          const wrap = document.createElement('div');
+          wrap.className = 'item';
+          const input = document.createElement('input');
+          input.type = 'radio'; input.name = 'choice'; input.id = id; input.required = true; input.value = String(idx);
+          const label = document.createElement('label'); label.setAttribute('for', id);
+          const img = document.createElement('img'); img.src = src;
+          label.appendChild(img);
+          wrap.appendChild(input); wrap.appendChild(label);
+          grid.appendChild(wrap);
+        });
+      }
+      async function finalize(selectedDataURL) {
+        const form = new FormData();
+        form.append('image', selectedDataURL);
+        const csrftoken = getCookie('csrftoken') || '';
+        const res = await fetch('{% url 'finalize' %}', { method: 'POST', body: form, headers: { 'X-CSRFToken': csrftoken } });
+        if (res.ok) return res.json();
+        try {
+          const data = await res.json();
+          const msg = (data && data.error) || '上傳失敗';
+          throw new Error(msg);
+        } catch (_) {
+          throw new Error('上傳失敗');
+        }
+      }
+      document.getElementById('selectForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const images = loadFrames();
+        const chosen = document.querySelector('input[name="choice"]:checked');
+        if (!chosen) return;
+        const idx = parseInt(chosen.value, 10);
+        const dataURL = images[idx];
+        try {
+          await finalize(dataURL);
+          // 完成後可清空暫存
+          sessionStorage.removeItem(STORAGE_KEY);
+          location.href = '{% url 'complete' %}';
+        } catch (e) {
+          console.error(e);
+          const message = (e && e.message) || '';
+          if (message === 'no-face') {
+            alert('未偵測到人臉，請重新選擇另一張影像');
+          } else if (message === 'bad-image') {
+            alert('影像格式錯誤，請重新選擇');
+          } else {
+            alert('上傳失敗，請重試');
+          }
+        }
+      });
+      (function() {
+        const images = loadFrames();
+        renderGrid(images);
+      })();
+    </script>
+  </body>
+  </html>
+
+

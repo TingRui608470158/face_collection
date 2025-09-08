@@ -1,0 +1,4 @@
+.venv/*
+collector/__pycache__/*
+media/*
+collector/migrations/__pycache__/*

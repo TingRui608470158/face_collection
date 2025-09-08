@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    {% load static %}
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SYNCROBOTIC LOGIN</title>
+    <link rel="stylesheet" href="{% static 'assets/app.css' %}?v=2" />
+    <style>
+      /* 限制登入欄位寬度，避免過長；加上 !important 以壓過全站輸入寬度設定 */
+      .auth-input { width: 280px !important; max-width: 100%; }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <img src="{% static 'assets/logo.png' %}?v={{ STATIC_VERSION }}" alt="SYNCROBOTIC" />
+      <strong>SYNCROBOTIC LOGIN</strong>
+    </header>
+    <main class="container" style="display:grid;place-items:center;min-height: calc(100dvh - 70px);">
+      <div class="card" style="width:100%;max-width:420px;">
+        <h2>歡迎回來</h2>
+        <p class="muted">請使用系統帳號登入以開始人臉影像收集。</p>
+        {% if form.errors %}
+          <div class="error">帳號或密碼錯誤，請再試一次。</div>
+        {% endif %}
+        <form method="post">
+          {% csrf_token %}
+          <div class="field">
+            <label for="id_username">帳號</label>
+            <input type="text" name="username" autofocus required id="id_username" class="auth-input" />
+          </div>
+          <div class="field">
+            <label for="id_password">密碼</label>
+            <input type="password" name="password" required id="id_password" class="auth-input" />
+          </div>
+          <button type="submit" class="btn">登入</button>
+        </form>
+        <div class="footer muted">如需協助，請聯絡系統管理員。</div>
+      </div>
+    </main>
+  </body>
+  </html>
+
+
+

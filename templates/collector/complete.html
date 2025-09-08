@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    {% load static %}
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>完成</title>
+    <link rel="stylesheet" href="{% static 'assets/app.css' %}?v=2" />
+  </head>
+  <body>
+    <header class="app-header">
+      <img src="{% static 'assets/logo.png' %}?v={{ STATIC_VERSION }}" alt="SYNCROBOTIC" />
+      <strong>完成</strong>
+      <form action="{% url 'logout' %}" method="post" class="align-right">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-secondary">登出</button>
+      </form>
+    </header>
+    <div class="steps">
+      <div class="container">
+        <ol>
+          <li>輸入</li>
+          <li>收集</li>
+          <li>選擇</li>
+          <li class="active">完成</li>
+        </ol>
+      </div>
+    </div>
+    <main class="container" style="max-width:960px;">
+      <div class="card">
+        <h2>完成：{{ profile.name }}</h2>
+        {% if selected %}
+          <p>你選擇的代表照片：</p>
+          <img class="preview" src="{{ selected.image.url }}" style="max-width:480px;width:100%;border-radius:12px;border:1px solid var(--border);" />
+        {% else %}
+          <p>尚未選擇代表照片。</p>
+        {% endif %}
+        <p style="margin-top:10px;"><a class="btn btn-secondary" href="{% url 'name_role_form' %}">回到開始</a></p>
+      </div>
+    </main>
+  </body>
+  </html>
+
+
