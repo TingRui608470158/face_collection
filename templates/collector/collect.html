@@ -1,4 +1,5 @@
 {% extends 'base_app.html' %}
+{% load static %}
 {% block title %}收集影像{% endblock %}
 {% block content %}
   {% with active_tab='collect' %}{% endwith %}
@@ -6,10 +7,25 @@
     <div class="col-12 col-xl-8 col-lg-7">
       <div class="card h-100"><div class="card-body">
         <h2 class="h5">收集影像：{{ profile.name }} ({{ profile.get_role_display }})</h2>
-        <p class="text-muted mb-2">步驟：1) 點「開始收集」→ 2) 看鏡頭保持3種角度與表情 → 3) 收集完成後點「下一步」選代表照。</p>
-        <p class="text-muted">提示：請正對鏡頭，頭部微轉左、中、右，各自然眨眼、微笑，保持畫面明亮。</p>
-        <div class="ratio ratio-4x3 mb-2" style="max-width: 640px;">
-          <video id="video" class="w-100 h-100" autoplay playsinline></video>
+        <!-- <p class="text-muted mb-2">步驟：1) 點「開始收集」→ 2) 看鏡頭保持3種角度與表情 → 3) 收集完成後點「下一步」選代表照。</p>
+        <p class="text-muted">提示：請正對鏡頭，頭部微轉左、中、右，各自然眨眼、微笑，保持畫面明亮。</p> -->
+        <div class="mb-2 d-flex align-items-center gap-3">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="source" id="src_camera" value="camera" checked>
+            <label class="form-check-label" for="src_camera">使用攝影機</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="source" id="src_upload" value="upload">
+            <label class="form-check-label" for="src_upload">上傳照片</label>
+          </div>
+        </div>
+        <div id="camera-wrap" class="ratio ratio-4x3 mb-2 position-relative" style="max-width: 640px;">
+          <img id="sample" src="{% static 'assets/face_sample.png' %}?v={{ STATIC_VERSION }}" class="w-100 h-100 position-absolute top-0 start-0" style="object-fit: contain; object-position: top center; background:#000;" alt="示意圖" />
+          <video id="video" class="w-100 h-100" autoplay playsinline style="display:none"></video>
+        </div>
+        <div id="upload-wrap" class="mb-2" style="max-width: 640px; display:none;">
+          <input id="file" type="file" accept="image/*" class="form-control" />
+          <div class="form-text">請選擇 1 張照片，會直接送出，不需再選擇</div>
         </div>
         <canvas id="canvas" style="display:none"></canvas>
         <div class="d-flex align-items-center gap-2 mb-2">
@@ -39,6 +55,11 @@
     const nextLink = document.getElementById('next');
     const thumbs = document.getElementById('thumbs');
     const progress = document.getElementById('progress');
+    const cameraWrap = document.getElementById('camera-wrap');
+    const uploadWrap = document.getElementById('upload-wrap');
+    const fileInput = document.getElementById('file');
+    const bar = document.getElementById('bar');
+    const countdown = document.getElementById('countdown');
 
     let stream = null;
     let timer = null;
@@ -65,6 +86,9 @@
       if (!ensureGetUserMedia()) { alert('瀏覽器不支援攝影機'); throw new Error('unsupported'); }
       if (stream) return;
       stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      // 切換顯示：隱藏示意圖，顯示攝影機
+      try { document.getElementById('sample').style.display = 'none'; } catch (e) {}
+      try { video.style.display = ''; } catch (e) {}
       video.srcObject = stream;
       await video.play();
     }
@@ -73,6 +97,9 @@
       stream.getTracks().forEach(t => t.stop());
       stream = null;
       video.srcObject = null;
+      // 停止後恢復示意圖
+      try { document.getElementById('sample').style.display = ''; } catch (e) {}
+      try { video.style.display = 'none'; } catch (e) {}
     }
 
     function dataURLFromVideo() {
@@ -89,6 +116,104 @@
       try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(images)); } catch (e) { console.error(e); }
     }
 
+    function getCookie(name) {
+      const v = `; ${document.cookie}`;
+      const parts = v.split(`; ${name}=`);
+      if (parts.length === 2) return parts.pop().split(';').shift();
+    }
+
+    async function finalizeSelected(selectedDataURL) {
+      const form = new FormData();
+      form.append('image', selectedDataURL);
+      const csrftoken = getCookie('csrftoken') || '';
+      const res = await fetch("{% url 'finalize' %}", { method: 'POST', body: form, headers: { 'X-CSRFToken': csrftoken } });
+      if (res.ok) return res.json();
+      try {
+        const data = await res.json();
+        const msg = (data && data.error) || '上傳失敗';
+        throw new Error(msg);
+      } catch (_) {
+        throw new Error('上傳失敗');
+      }
+    }
+
+    function renderThumbsFromArray(images) {
+      thumbs.innerHTML = '';
+      images.forEach((src) => {
+        const col = document.createElement('div');
+        col.className = 'col';
+        const img = document.createElement('img');
+        img.src = src; img.className = 'img-fluid rounded';
+        col.appendChild(img);
+        thumbs.appendChild(col);
+      });
+    }
+
+    function setSource(mode) {
+      if (mode === 'upload') {
+        // 停用攝影機並切換到上傳
+        stopCamera().catch(() => {});
+        cameraWrap.style.display = 'none';
+        uploadWrap.style.display = '';
+        startBtn.style.display = 'none';
+        nextLink.style.display = 'none';
+        // 重置狀態
+        frames = 0;
+        progress.textContent = '0';
+        bar.style.width = '0%';
+        countdown.textContent = '尚未開始';
+        nextLink.setAttribute('disabled','disabled');
+        saveFramesToSession([]);
+      } else {
+        // 攝影機模式
+        cameraWrap.style.display = '';
+        uploadWrap.style.display = 'none';
+        startBtn.style.display = '';
+        nextLink.style.display = '';
+        // 回到攝影機模式時預設顯示示意圖、隱藏 video（尚未開始收集）
+        try { document.getElementById('sample').style.display = ''; } catch (e) {}
+        try { video.style.display = 'none'; } catch (e) {}
+      }
+    }
+
+    async function handleFilesSelected(files) {
+      const list = Array.from(files || []).filter(f => (f && f.type || '').startsWith('image/')).slice(0, 1);
+      if (list.length === 0) {
+        thumbs.innerHTML = '';
+        progress.textContent = '0';
+        bar.style.width = '0%';
+        nextLink.setAttribute('disabled','disabled');
+        saveFramesToSession([]);
+        return;
+      }
+      const readAsDataURL = (file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      try {
+        fileInput.disabled = true;
+        const dataURL = await readAsDataURL(list[0]);
+        // 可選預覽：renderThumbsFromArray([dataURL]);
+        await finalizeSelected(dataURL);
+        try { sessionStorage.removeItem(STORAGE_KEY); } catch (_) {}
+        location.href = "{% url 'complete' %}";
+      } catch (e) {
+        console.error(e);
+        const message = (e && e.message) || '';
+        if (message === 'no-face') {
+          alert('未偵測到人臉，請重新選擇另一張影像');
+        } else if (message === 'bad-image') {
+          alert('影像格式錯誤，請重新選擇');
+        } else {
+          alert('上傳失敗，請重試');
+        }
+      } finally {
+        fileInput.disabled = false;
+      }
+    }
+
     async function beginCollect() {
       frames = 0;
       thumbs.innerHTML = '';
@@ -96,8 +221,6 @@
       nextLink.setAttribute('disabled','disabled');
       await startCamera();
       secondsLeft = 5;
-      const bar = document.getElementById('bar');
-      const countdown = document.getElementById('countdown');
       countdown.textContent = `剩餘 ${secondsLeft} 秒`;
       timer = setInterval(async () => {
         try {
@@ -121,8 +244,9 @@
           if (frames >= 10) {
             clearInterval(timer); timer = null;
             await stopCamera();
-            nextLink.removeAttribute('disabled');
-            startBtn.disabled = false;
+            // 自動前往下一步（選擇代表照）
+            location.href = "{% url 'select_image' %}";
+            return;
           }
         } catch (e) { console.error(e); }
       }, 500);
@@ -135,6 +259,18 @@
       nextLink.setAttribute('disabled','disabled');
       try { await beginCollect(); } finally {}
     });
+    document.getElementById('src_camera').addEventListener('change', (e) => {
+      if (e.target.checked) setSource('camera');
+    });
+    document.getElementById('src_upload').addEventListener('change', (e) => {
+      if (e.target.checked) setSource('upload');
+    });
+    if (fileInput) {
+      fileInput.addEventListener('change', (e) => {
+        handleFilesSelected(e.target.files);
+      });
+    }
+    setSource('camera');
     window.addEventListener('beforeunload', () => { if (timer) clearInterval(timer); });
   </script>
 {% endblock %}

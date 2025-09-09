@@ -9,6 +9,8 @@ import uuid
 import cv2
 import numpy as np
 import hashlib
+import logging
+from datetime import timezone as dt_timezone, timedelta
 
 from .forms import NameRoleForm
 from .models import Profile, Capture
@@ -35,6 +37,19 @@ def name_role_form(request: HttpRequest):
                     request.session['employee_id'] = (form.cleaned_data.get('employee_id') or '').strip()
                 else:
                     request.session.pop('employee_id', None)
+                    # 訪客：預先建立雲端訪客並保存 index 於 session，後續 finalize 直接沿用
+                    try:
+                        pre = cloud.pre_register_visitor()
+                        index = (
+                            pre.get('index')
+                            or (pre.get('data') or {}).get('index')
+                            or (pre.get('result') or {}).get('index')
+                        )
+                        if index:
+                            request.session['visitor_index'] = index
+                    except Exception:
+                        # 不阻斷本地流程
+                        pass
             except Exception:
                 pass
             return redirect('collect')
@@ -148,29 +163,58 @@ def finalize(request: HttpRequest):
                 except Exception:
                     pass
         else:
-            # 訪客：走雲端訪客註冊三步驟
+            # 訪客：使用 session 中的 visitor_index（若無則現場建立），避免分裂多筆紀錄
             try:
-                pre = cloud.pre_register_visitor()
-                # 柔性解析 index 欄位
-                index = (
-                    pre.get('index')
-                    or (pre.get('data') or {}).get('index')
-                    or (pre.get('result') or {}).get('index')
-                )
+                index = (request.session.get('visitor_index') or '').strip()
+                if not index:
+                    pre = cloud.pre_register_visitor()
+                    index = (
+                        pre.get('index')
+                        or (pre.get('data') or {}).get('index')
+                        or (pre.get('result') or {}).get('index')
+                    )
+                    if index:
+                        request.session['visitor_index'] = index
                 if index:
+                    # 基本必填：姓名 + 來訪時段（UTC/Z 格式）
+                    now_utc = timezone.now().astimezone(dt_timezone.utc)
+                    visit_start = now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    visit_end = (now_utc + timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    info_payload = {
+                        'name': profile.name,
+                        'visit_start': visit_start,
+                        'visit_end': visit_end,
+                        'purpose': 'face_registration',
+                        'company': 'NA',
+                        'plate_number': 'NA',
+                        'phone_number': 'NA',
+                        'email': 'NA',
+                    }
                     # 先嘗試更新主要欄位，避免 fill-info 覆寫為空
                     try:
-                        cloud.update_visitor(index, {'name': profile.name})
-                    except Exception:
-                        pass
-                    cloud.fill_info_visitor(index, {'name': profile.name})
-                    cloud.face_capture_visitor(index, {
-                        'face_image': data_url,
-                        'face_feature': None,
-                    })
-            except Exception:
-                # 雲端不中斷本地流程
-                pass
+                        cloud.update_visitor(index, info_payload)
+                    except Exception as e:
+                        logging.exception('cloud.update_visitor failed: %s', e)
+                    try:
+                        cloud.fill_info_visitor(index, info_payload)
+                    except Exception as e:
+                        logging.exception('cloud.fill_info_visitor failed: %s', e)
+                    try:
+                        # 參考員工上傳格式：使用 face_image 為 data URL，並附 face_feature
+                        face_payload = {
+                            'face_image': data_url,
+                            'face_feature': None,
+                        }
+                        fc = cloud.face_capture_visitor(index, face_payload)
+                        try:
+                            logging.info('cloud.face_capture_visitor response: %s', str(fc)[:300])
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logging.exception('cloud.face_capture_visitor failed: %s', e)
+            except Exception as e:
+                # 雲端不中斷本地流程，但記錄詳細錯誤以便排查
+                logging.exception('cloud pre_register/flow failed: %s', e)
     except Exception:
         # 不阻斷本地流程
         pass
@@ -235,6 +279,31 @@ def console_employee_delete(request: HttpRequest, employee_id: str):
 
 
 @login_required
+def console_employee_detail(request: HttpRequest, employee_id: str):
+    item = None
+    error = None
+    image_src = None
+    try:
+        item = cloud.get_employee(employee_id)
+        if not item:
+            error = 'not-found'
+        else:
+            image_src = (
+                (item.get('face_image') if isinstance(item, dict) else None)
+                or (item.get('data', {}) if isinstance(item, dict) else {}).get('face_image')
+                or (item.get('result', {}) if isinstance(item, dict) else {}).get('face_image')
+            )
+    except Exception as e:
+        error = str(e)
+    return render(request, 'collector/console_employee_detail.html', {
+        'item': item,
+        'image_src': image_src,
+        'error': error,
+        'active_tab': 'employees',
+    })
+
+
+@login_required
 def console_visitors(request: HttpRequest):
     query_skip = int(request.GET.get('skip', '0') or '0')
     query_limit = int(request.GET.get('limit', '20') or '20')
@@ -257,4 +326,43 @@ def console_visitor_delete(request: HttpRequest, visitor_index: str):
         return redirect('console_visitors')
     except Exception as e:
         return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+
+
+@login_required
+def console_visitor_detail(request: HttpRequest, visitor_index: str):
+    item = None
+    error = None
+    image_src = None
+    has_face = False
+    try:
+        item = cloud.get_visitor(visitor_index)
+        if not item:
+            error = 'not-found'
+        else:
+            # Normalize image selection
+            face = (
+                item.get('face_image')
+                or (item.get('data') or {}).get('face_image')
+                or (item.get('result') or {}).get('face_image')
+            )
+            qr = (
+                item.get('qrcode_base64')
+                or (item.get('data') or {}).get('qrcode_base64')
+                or (item.get('result') or {}).get('qrcode_base64')
+            )
+            image_src = face or qr
+            has_face = bool(face)
+    except Exception as e:
+        error = str(e)
+    return render(
+        request,
+        'collector/console_visitor_detail.html',
+        {
+            'item': item,
+            'image_src': image_src,
+            'has_face': has_face,
+            'error': error,
+            'active_tab': 'visitors',
+        },
+    )
 

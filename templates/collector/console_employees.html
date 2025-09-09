@@ -26,6 +26,7 @@
                 <td>{{ it.name }}</td>
                 <td>{{ it.created_at }}</td>
                 <td>
+                  <a class="btn btn-outline-primary btn-sm" href="{% url 'console_employee_detail' it.employee_id %}">查看</a>
                   <form method="post" action="{% url 'console_employee_delete' it.employee_id %}" onsubmit="return confirm('確認刪除員工 '+(this.dataset.n||'')+'?');" data-n="{{ it.name }}">
                     {% csrf_token %}
                     <button class="btn btn-outline-danger btn-sm" type="submit">刪除</button>

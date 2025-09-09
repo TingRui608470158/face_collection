@@ -92,6 +92,14 @@ class CloudAPIClient:
         return resp.json() if resp.headers.get('Content-Type','').startswith('application/json') and resp.text else {'ok': True}
 
     # Visitor registration flow
+    def get_visitor(self, index: str) -> Optional[Dict[str, Any]]:
+        """Fetch single visitor details, returns JSON or None if not found."""
+        self._ensure_login()
+        resp = self._get_session().get(f'{self.base_url}/visitors/{index}')
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
     def pre_register_visitor(self) -> Dict[str, Any]:
         """Create a new visitor record, returns {index, qrcode_base64, ...}."""
         self._ensure_login()

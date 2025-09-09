@@ -34,6 +34,7 @@
               <td>{{ it.register_status }}</td>
               <td>{{ it.created_at }}</td>
               <td>
+                <a class="btn btn-outline-primary btn-sm" href="{% url 'console_visitor_detail' it.index %}">查看</a>
                 <form method="post" action="{% url 'console_visitor_delete' it.index %}" onsubmit="return confirm('確認刪除訪客 '+(this.dataset.n||'')+'?');" data-n="{{ it.name }}">
                   {% csrf_token %}
                   <button class="btn btn-outline-danger btn-sm" type="submit">刪除</button>

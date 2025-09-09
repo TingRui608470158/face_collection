@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    {% load static %}
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>訪客詳情</title>
+    <link rel="stylesheet" href="{% static 'assets/app.css' %}?v=2" />
+    <style>
+      .img-wrap { display:flex; align-items:center; justify-content:center; padding:24px; }
+      .img-wrap img { max-width:720px; width:100%; border-radius:12px; border:1px solid var(--border, #ddd); }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <img src="{% static 'assets/logo.png' %}?v={{ STATIC_VERSION }}" alt="SYNCROBOTIC" />
+      <strong>訪客詳情</strong>
+      <a href="{% url 'console_visitors' %}" class="btn btn-secondary">返回列表</a>
+    </header>
+    <main class="container" style="max-width:960px;">
+      <div class="card"><div class="card-body">
+        {% if error %}
+          <div class="alert alert-warning">取得資料失敗：{{ error }}</div>
+        {% endif %}
+        {% if item %}
+          {% if image_src %}
+            <div class="img-wrap"><img src="{{ image_src }}" alt="visitor image" /></div>
+          {% else %}
+            <p class="text-muted">尚未上傳人臉影像。</p>
+          {% endif %}
+        {% else %}
+          <p class="text-muted">沒有資料</p>
+        {% endif %}
+      </div></div>
+    </main>
+  </body>
+</html>
