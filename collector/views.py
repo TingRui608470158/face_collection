@@ -84,6 +84,18 @@ def upload_frame(request: HttpRequest):
     header, b64data = data_url.split(',', 1)
     binary = base64.b64decode(b64data)
 
+    # 僅保存含人臉的影像，避免非人臉殘留
+    try:
+        np_arr = np.frombuffer(binary, dtype=np.uint8)
+        image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            return JsonResponse({'ok': False, 'error': 'bad-image'}, status=400)
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        if not has_face_features(image_rgb):
+            return JsonResponse({'ok': False, 'error': 'no-face'}, status=400)
+    except Exception:
+        return JsonResponse({'ok': False, 'error': 'insightface-error'}, status=500)
+
     filename = f"{timezone.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
     sha256 = hashlib.sha256(binary).hexdigest()
     cap = Capture(profile=profile, batch_id=batch_id, image_sha256=sha256, image_size=len(binary))
@@ -138,6 +150,12 @@ def finalize(request: HttpRequest):
     cap = Capture(profile=profile, batch_id=batch_id, selected=True, image_sha256=sha256, image_size=len(binary))
     cap.image.save(filename, ContentFile(binary))
     cap.save()
+
+    # 僅保留本次代表照，清理同批次其它影像，避免非人臉或舊影像殘留
+    try:
+        Capture.objects.filter(profile=profile, batch_id=batch_id).exclude(id=cap.id).delete()
+    except Exception:
+        pass
 
     # 若為員工，將代表照同步到雲端建立員工
     try:

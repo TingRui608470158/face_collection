@@ -21,7 +21,6 @@
             <tr>
               <th>識別碼</th>
               <th>姓名</th>
-              <th>狀態</th>
               <th>建立時間</th>
               <th>操作</th>
             </tr>
@@ -31,7 +30,6 @@
             <tr>
               <td>{{ it.index }}</td>
               <td>{{ it.name }}</td>
-              <td>{{ it.register_status }}</td>
               <td>{{ it.created_at }}</td>
               <td>
                 <a class="btn btn-outline-primary btn-sm" href="{% url 'console_visitor_detail' it.index %}">查看</a>
