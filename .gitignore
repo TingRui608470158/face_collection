@@ -2,3 +2,15 @@
 collector/__pycache__/*
 media/*
 collector/migrations/__pycache__/*
+collector/migrations/*
+scripts/__pycache__/*
+webapp/__pycache__/*
+db.sqlite3
+staticfiles/
+*.pyc
+__pycache__/
+*.log
+*.DS_Store
+node_modules/
+*.sqlite3
+*.sqlite
