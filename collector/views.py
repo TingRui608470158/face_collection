@@ -2,6 +2,7 @@ from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpRequest
 from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.core.files.base import ContentFile
 from django.utils import timezone
 import base64
@@ -14,44 +15,57 @@ from datetime import timezone as dt_timezone, timedelta
 
 from .forms import NameRoleForm
 from .models import Profile, Capture
+from django.conf import settings
 from .cloud_api import client as cloud
 from scripts.insight_utils import has_face_features
 
 
+@ensure_csrf_cookie
 def name_role_form(request: HttpRequest):
     if not request.user.is_authenticated:
         return redirect('login')
 
-    # 清理過期訪客（每日）
-    Profile.objects.filter(role=Profile.ROLE_VISITOR, expires_at__lt=timezone.now()).delete()
+    # 清理過期訪客（每日）— 若資料表尚未建立或租戶 DB 尚未初始化，避免阻斷流程
+    try:
+        Profile.objects.filter(role=Profile.ROLE_VISITOR, expires_at__lt=timezone.now()).delete()
+    except Exception:
+        # 允許略過（例如新租戶尚未 migrate 完成）
+        pass
 
     if request.method == 'POST':
         form = NameRoleForm(request.POST)
         if form.is_valid():
-            profile = form.save_profile()
+            # 單資料庫模式：依使用者所屬公司建立 Profile
+            user_company = None
+            try:
+                user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            except Exception:
+                user_company = None
+            profile = form.save_profile(company=user_company)
             request.session['profile_id'] = profile.id
             request.session['batch_id'] = uuid.uuid4().hex
             # 若為員工，暫存雲端所需欄位以便 finalize 上傳
-            try:
-                if form.cleaned_data.get('role') == Profile.ROLE_EMPLOYEE:
-                    request.session['employee_id'] = (form.cleaned_data.get('employee_id') or '').strip()
-                else:
-                    request.session.pop('employee_id', None)
-                    # 訪客：預先建立雲端訪客並保存 index 於 session，後續 finalize 直接沿用
-                    try:
-                        pre = cloud.pre_register_visitor()
-                        index = (
-                            pre.get('index')
-                            or (pre.get('data') or {}).get('index')
-                            or (pre.get('result') or {}).get('index')
-                        )
-                        if index:
-                            request.session['visitor_index'] = index
-                    except Exception:
-                        # 不阻斷本地流程
-                        pass
-            except Exception:
-                pass
+            if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+                try:
+                    if form.cleaned_data.get('role') == Profile.ROLE_EMPLOYEE:
+                        request.session['employee_id'] = (form.cleaned_data.get('employee_id') or '').strip()
+                    else:
+                        request.session.pop('employee_id', None)
+                        # 訪客：預先建立雲端訪客並保存 index 於 session，後續 finalize 直接沿用
+                        try:
+                            pre = cloud.pre_register_visitor()
+                            index = (
+                                pre.get('index')
+                                or (pre.get('data') or {}).get('index')
+                                or (pre.get('result') or {}).get('index')
+                            )
+                            if index:
+                                request.session['visitor_index'] = index
+                        except Exception:
+                            # 不阻斷本地流程
+                            pass
+                except Exception:
+                    pass
             return redirect('collect')
     else:
         form = NameRoleForm()
@@ -59,12 +73,15 @@ def name_role_form(request: HttpRequest):
 
 
 @login_required
+@ensure_csrf_cookie
 def collect(request: HttpRequest):
     profile_id = request.session.get('profile_id')
     batch_id = request.session.get('batch_id')
     if not profile_id or not batch_id:
         return redirect('name_role_form')
-    profile = Profile.objects.get(id=profile_id)
+    # 僅從使用者公司範圍讀取
+    user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+    profile = Profile.objects.get(id=profile_id, company=user_company)
     return render(request, 'collector/collect.html', {'profile': profile, 'batch_id': batch_id, 'active_tab': 'collect'})
 
 
@@ -75,7 +92,8 @@ def upload_frame(request: HttpRequest):
     batch_id = request.session.get('batch_id')
     if not profile_id or not batch_id:
         return JsonResponse({'error': 'no-session'}, status=400)
-    profile = Profile.objects.get(id=profile_id)
+    user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+    profile = Profile.objects.get(id=profile_id, company=user_company)
 
     # 期待 dataURL base64: data:image/jpeg;base64,...
     data_url = request.POST.get('image')
@@ -124,7 +142,8 @@ def finalize(request: HttpRequest):
         batch_id = uuid.uuid4().hex
         request.session['batch_id'] = batch_id
 
-    profile = Profile.objects.get(id=profile_id)
+    user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+    profile = Profile.objects.get(id=profile_id, company=user_company)
 
     data_url = request.POST.get('image')
     if not data_url or not data_url.startswith('data:image'):
@@ -157,90 +176,85 @@ def finalize(request: HttpRequest):
     except Exception:
         pass
 
-    # 若為員工，將代表照同步到雲端建立員工
-    try:
-        if profile.role == Profile.ROLE_EMPLOYEE:
-            employee_id = (request.session.get('employee_id') or profile.name).strip()
-            payload = {
-                'name': profile.name,
-                'employee_id': employee_id or profile.name,
-                'plate_number': 'NA',
-                'face_image': data_url,
-                'face_feature': None,
-            }
-            try:
-                cloud.create_employee(payload)
-            except Exception:
-                # 若已存在，嘗試改為更新資料（如補上最新代表照）
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        # 若為員工/訪客，執行雲端同步；若關閉則完全跳過
+        try:
+            if profile.role == Profile.ROLE_EMPLOYEE:
+                employee_id = (request.session.get('employee_id') or profile.name).strip()
+                payload = {
+                    'name': profile.name,
+                    'employee_id': employee_id or profile.name,
+                    'plate_number': 'NA',
+                    'face_image': data_url,
+                    'face_feature': None,
+                }
                 try:
-                    cloud.update_employee(employee_id or profile.name, {
-                        'name': profile.name,
-                        'face_image': data_url,
-                        'face_feature': None,
-                    })
+                    cloud.create_employee(payload)
                 except Exception:
-                    pass
-        else:
-            # 訪客：使用 session 中的 visitor_index（若無則現場建立），避免分裂多筆紀錄
-            try:
-                index = (request.session.get('visitor_index') or '').strip()
-                if not index:
-                    pre = cloud.pre_register_visitor()
-                    index = (
-                        pre.get('index')
-                        or (pre.get('data') or {}).get('index')
-                        or (pre.get('result') or {}).get('index')
-                    )
-                    if index:
-                        request.session['visitor_index'] = index
-                if index:
-                    # 基本必填：姓名 + 來訪時段（UTC/Z 格式）
-                    now_utc = timezone.now().astimezone(dt_timezone.utc)
-                    visit_start = now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-                    visit_end = (now_utc + timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    info_payload = {
-                        'name': profile.name,
-                        'visit_start': visit_start,
-                        'visit_end': visit_end,
-                        'purpose': 'face_registration',
-                        'company': 'NA',
-                        'plate_number': 'NA',
-                        'phone_number': 'NA',
-                        'email': 'NA',
-                    }
-                    # 先嘗試更新主要欄位，避免 fill-info 覆寫為空
                     try:
-                        cloud.update_visitor(index, info_payload)
-                    except Exception as e:
-                        logging.exception('cloud.update_visitor failed: %s', e)
-                    try:
-                        cloud.fill_info_visitor(index, info_payload)
-                    except Exception as e:
-                        logging.exception('cloud.fill_info_visitor failed: %s', e)
-                    try:
-                        # 參考員工上傳格式：使用 face_image 為 data URL，並附 face_feature
-                        face_payload = {
+                        cloud.update_employee(employee_id or profile.name, {
+                            'name': profile.name,
                             'face_image': data_url,
                             'face_feature': None,
+                        })
+                    except Exception:
+                        pass
+            else:
+                try:
+                    index = (request.session.get('visitor_index') or '').strip()
+                    if not index:
+                        pre = cloud.pre_register_visitor()
+                        index = (
+                            pre.get('index')
+                            or (pre.get('data') or {}).get('index')
+                            or (pre.get('result') or {}).get('index')
+                        )
+                        if index:
+                            request.session['visitor_index'] = index
+                    if index:
+                        now_utc = timezone.now().astimezone(dt_timezone.utc)
+                        visit_start = now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+                        visit_end = (now_utc + timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        info_payload = {
+                            'name': profile.name,
+                            'visit_start': visit_start,
+                            'visit_end': visit_end,
+                            'purpose': 'face_registration',
+                            'company': 'NA',
+                            'plate_number': 'NA',
+                            'phone_number': 'NA',
+                            'email': 'NA',
                         }
-                        fc = cloud.face_capture_visitor(index, face_payload)
                         try:
-                            logging.info('cloud.face_capture_visitor response: %s', str(fc)[:300])
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        logging.exception('cloud.face_capture_visitor failed: %s', e)
-            except Exception as e:
-                # 雲端不中斷本地流程，但記錄詳細錯誤以便排查
-                logging.exception('cloud pre_register/flow failed: %s', e)
-    except Exception:
-        # 不阻斷本地流程
-        pass
+                            cloud.update_visitor(index, info_payload)
+                        except Exception as e:
+                            logging.exception('cloud.update_visitor failed: %s', e)
+                        try:
+                            cloud.fill_info_visitor(index, info_payload)
+                        except Exception as e:
+                            logging.exception('cloud.fill_info_visitor failed: %s', e)
+                        try:
+                            face_payload = {
+                                'face_image': data_url,
+                                'face_feature': None,
+                            }
+                            fc = cloud.face_capture_visitor(index, face_payload)
+                            try:
+                                logging.info('cloud.face_capture_visitor response: %s', str(fc)[:300])
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logging.exception('cloud.face_capture_visitor failed: %s', e)
+                except Exception as e:
+                    logging.exception('cloud pre_register/flow failed: %s', e)
+        except Exception:
+            pass
 
     return JsonResponse({'ok': True})
 
 
 @login_required
+@ensure_csrf_cookie
 def select_image(request: HttpRequest):
     profile_id = request.session.get('profile_id')
     batch_id = request.session.get('batch_id')
@@ -272,115 +286,247 @@ def complete(request: HttpRequest):
 # --- Console pages backed by cloud API ---
 
 @login_required
+@ensure_csrf_cookie
 def console_employees(request: HttpRequest):
     query_skip = int(request.GET.get('skip', '0') or '0')
     query_limit = int(request.GET.get('limit', '20') or '20')
-    try:
-        data = cloud.list_employees(skip=query_skip, limit=query_limit)
-    except Exception as e:
-        data = {'total': 0, 'items': [], 'error': str(e)}
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        try:
+            data = cloud.list_employees(skip=query_skip, limit=query_limit)
+        except Exception as e:
+            data = {'total': 0, 'items': [], 'error': str(e)}
+    else:
+        user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+        qs = Profile.objects.filter(role=Profile.ROLE_EMPLOYEE, company=user_company).order_by('-created_at')
+        total = qs.count()
+        items = [
+            {
+                'employee_id': str(p.id),
+                'name': p.name,
+                'created_at': p.created_at,
+            }
+            for p in qs[query_skip:query_skip + query_limit]
+        ]
+        data = {'total': total, 'items': items}
     return render(request, 'collector/console_employees.html', {'data': data, 'active_tab': 'employees'})
+
+
+@login_required
+@ensure_csrf_cookie
+def console_employee_create(request: HttpRequest):
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        return redirect('console_employees')
+    if request.method == 'POST':
+        name = (request.POST.get('name') or '').strip()
+        emp_id = (request.POST.get('employee_id') or '').strip()
+        if not name or not emp_id:
+            return render(request, 'collector/console_employee_create.html', {'error': '姓名與員工編號必填'})
+        p = Profile.objects.create(name=name, role=Profile.ROLE_EMPLOYEE)
+        return redirect('console_employees')
+    return render(request, 'collector/console_employee_create.html')
 
 
 @login_required
 @require_POST
 def console_employee_delete(request: HttpRequest, employee_id: str):
-    try:
-        cloud.delete_employee(employee_id)
-        # Prefer staying on the same page (PRG pattern)
-        referer = request.META.get('HTTP_REFERER')
-        if referer:
-            return redirect(referer)
-        return redirect('console_employees')
-    except Exception as e:
-        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        try:
+            cloud.delete_employee(employee_id)
+            referer = request.META.get('HTTP_REFERER')
+            if referer:
+                return redirect(referer)
+            return redirect('console_employees')
+        except Exception as e:
+            return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    else:
+        try:
+            pid = int(employee_id)
+            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            Profile.objects.filter(id=pid, role=Profile.ROLE_EMPLOYEE, company=user_company).delete()
+            referer = request.META.get('HTTP_REFERER')
+            if referer:
+                return redirect(referer)
+            return redirect('console_employees')
+        except Exception as e:
+            return JsonResponse({'ok': False, 'error': str(e)}, status=400)
 
 
 @login_required
 def console_employee_detail(request: HttpRequest, employee_id: str):
-    item = None
-    error = None
-    image_src = None
-    try:
-        item = cloud.get_employee(employee_id)
-        if not item:
-            error = 'not-found'
-        else:
-            image_src = (
-                (item.get('face_image') if isinstance(item, dict) else None)
-                or (item.get('data', {}) if isinstance(item, dict) else {}).get('face_image')
-                or (item.get('result', {}) if isinstance(item, dict) else {}).get('face_image')
-            )
-    except Exception as e:
-        error = str(e)
-    return render(request, 'collector/console_employee_detail.html', {
-        'item': item,
-        'image_src': image_src,
-        'error': error,
-        'active_tab': 'employees',
-    })
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        item = None
+        error = None
+        image_src = None
+        try:
+            item = cloud.get_employee(employee_id)
+            if not item:
+                error = 'not-found'
+            else:
+                image_src = (
+                    (item.get('face_image') if isinstance(item, dict) else None)
+                    or (item.get('data', {}) if isinstance(item, dict) else {}).get('face_image')
+                    or (item.get('result', {}) if isinstance(item, dict) else {}).get('face_image')
+                )
+        except Exception as e:
+            error = str(e)
+        return render(request, 'collector/console_employee_detail.html', {
+            'item': item,
+            'image_src': image_src,
+            'error': error,
+            'active_tab': 'employees',
+        })
+    else:
+        error = None
+        image_src = None
+        try:
+            pid = int(employee_id)
+            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            p = Profile.objects.get(id=pid, role=Profile.ROLE_EMPLOYEE, company=user_company)
+            cap = Capture.objects.filter(profile=p, selected=True).first() or Capture.objects.filter(profile=p).order_by('-created_at').first()
+            if cap and getattr(cap.image, 'url', None):
+                image_src = cap.image.url
+            item = {'name': p.name}
+        except Exception as e:
+            item = None
+            error = str(e)
+        return render(request, 'collector/console_employee_detail.html', {
+            'item': item,
+            'image_src': image_src,
+            'error': error,
+            'active_tab': 'employees',
+        })
 
 
 @login_required
+@ensure_csrf_cookie
 def console_visitors(request: HttpRequest):
     query_skip = int(request.GET.get('skip', '0') or '0')
     query_limit = int(request.GET.get('limit', '20') or '20')
-    try:
-        data = cloud.list_visitors(skip=query_skip, limit=query_limit)
-    except Exception as e:
-        data = {'total': 0, 'items': [], 'error': str(e)}
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        try:
+            data = cloud.list_visitors(skip=query_skip, limit=query_limit)
+        except Exception as e:
+            data = {'total': 0, 'items': [], 'error': str(e)}
+    else:
+        user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+        qs = Profile.objects.filter(role=Profile.ROLE_VISITOR, company=user_company).order_by('-created_at')
+        total = qs.count()
+        items = [
+            {
+                'index': str(p.id),
+                'name': p.name,
+                'created_at': p.created_at,
+            }
+            for p in qs[query_skip:query_skip + query_limit]
+        ]
+        data = {'total': total, 'items': items}
     return render(request, 'collector/console_visitors.html', {'data': data, 'active_tab': 'visitors'})
+
+
+@login_required
+@ensure_csrf_cookie
+def console_visitor_create(request: HttpRequest):
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        return redirect('console_visitors')
+    if request.method == 'POST':
+        name = (request.POST.get('name') or '').strip()
+        if not name:
+            return render(request, 'collector/console_visitor_create.html', {'error': '姓名必填'})
+        # 設定當天到期
+        now = timezone.now()
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        Profile.objects.create(name=name, role=Profile.ROLE_VISITOR, expires_at=end_of_day)
+        return redirect('console_visitors')
+    return render(request, 'collector/console_visitor_create.html')
 
 
 @login_required
 @require_POST
 def console_visitor_delete(request: HttpRequest, visitor_index: str):
-    try:
-        cloud.delete_visitor(visitor_index)
-        # Prefer staying on the same page (PRG pattern)
-        referer = request.META.get('HTTP_REFERER')
-        if referer:
-            return redirect(referer)
-        return redirect('console_visitors')
-    except Exception as e:
-        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        try:
+            cloud.delete_visitor(visitor_index)
+            referer = request.META.get('HTTP_REFERER')
+            if referer:
+                return redirect(referer)
+            return redirect('console_visitors')
+        except Exception as e:
+            return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    else:
+        try:
+            pid = int(visitor_index)
+            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            Profile.objects.filter(id=pid, role=Profile.ROLE_VISITOR, company=user_company).delete()
+            referer = request.META.get('HTTP_REFERER')
+            if referer:
+                return redirect(referer)
+            return redirect('console_visitors')
+        except Exception as e:
+            return JsonResponse({'ok': False, 'error': str(e)}, status=400)
 
 
 @login_required
 def console_visitor_detail(request: HttpRequest, visitor_index: str):
-    item = None
-    error = None
-    image_src = None
-    has_face = False
-    try:
-        item = cloud.get_visitor(visitor_index)
-        if not item:
-            error = 'not-found'
-        else:
-            # Normalize image selection
-            face = (
-                item.get('face_image')
-                or (item.get('data') or {}).get('face_image')
-                or (item.get('result') or {}).get('face_image')
-            )
-            qr = (
-                item.get('qrcode_base64')
-                or (item.get('data') or {}).get('qrcode_base64')
-                or (item.get('result') or {}).get('qrcode_base64')
-            )
-            image_src = face or qr
-            has_face = bool(face)
-    except Exception as e:
-        error = str(e)
-    return render(
-        request,
-        'collector/console_visitor_detail.html',
-        {
-            'item': item,
-            'image_src': image_src,
-            'has_face': has_face,
-            'error': error,
-            'active_tab': 'visitors',
-        },
-    )
+    if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
+        item = None
+        error = None
+        image_src = None
+        has_face = False
+        try:
+            item = cloud.get_visitor(visitor_index)
+            if not item:
+                error = 'not-found'
+            else:
+                face = (
+                    item.get('face_image')
+                    or (item.get('data') or {}).get('face_image')
+                    or (item.get('result') or {}).get('face_image')
+                )
+                qr = (
+                    item.get('qrcode_base64')
+                    or (item.get('data') or {}).get('qrcode_base64')
+                    or (item.get('result') or {}).get('qrcode_base64')
+                )
+                image_src = face or qr
+                has_face = bool(face)
+        except Exception as e:
+            error = str(e)
+        return render(
+            request,
+            'collector/console_visitor_detail.html',
+            {
+                'item': item,
+                'image_src': image_src,
+                'has_face': has_face,
+                'error': error,
+                'active_tab': 'visitors',
+            },
+        )
+    else:
+        error = None
+        image_src = None
+        has_face = False
+        try:
+            pid = int(visitor_index)
+            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            p = Profile.objects.get(id=pid, role=Profile.ROLE_VISITOR, company=user_company)
+            cap = Capture.objects.filter(profile=p, selected=True).first() or Capture.objects.filter(profile=p).order_by('-created_at').first()
+            if cap and getattr(cap.image, 'url', None):
+                image_src = cap.image.url
+                has_face = True
+            item = {'name': p.name}
+        except Exception as e:
+            item = None
+            error = str(e)
+        return render(
+            request,
+            'collector/console_visitor_detail.html',
+            {
+                'item': item,
+                'image_src': image_src,
+                'has_face': has_face,
+                'error': error,
+                'active_tab': 'visitors',
+            },
+        )
 

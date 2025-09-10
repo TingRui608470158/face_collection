@@ -13,6 +13,9 @@
       <div class="d-flex align-items-center gap-2 mb-2">
         <h2 class="h5 m-0">訪客列表</h2>
         <span class="text-muted">共 {{ data.total|default:0 }} 筆</span>
+        {% if not CLOUD_SYNC_ENABLED %}
+        <a class="btn btn-primary" href="{% url 'console_visitor_create' %}">新增訪客</a>
+        {% endif %}
         <a class="btn btn-outline-secondary ms-auto" href="{% url 'name_role_form' %}">返回作業</a>
       </div>
       <div class="table-responsive">

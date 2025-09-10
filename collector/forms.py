@@ -23,7 +23,7 @@ class NameRoleForm(forms.Form):
                 self.add_error('employee_id', '員工編號為必填')
         return cleaned
 
-    def save_profile(self) -> Profile:
+    def save_profile(self, *, company=None) -> Profile:
         name = self.cleaned_data['name'].strip()
         role = self.cleaned_data['role']
         expires_at = None
@@ -32,7 +32,7 @@ class NameRoleForm(forms.Form):
             now = timezone.now()
             end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
             expires_at = end_of_day
-        return Profile.objects.create(name=name, role=role, expires_at=expires_at)
+        return Profile.objects.create(name=name, role=role, expires_at=expires_at, company=company)
 
 
 

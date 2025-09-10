@@ -67,6 +67,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'webapp.settings_context.globals',
             ],
         },
     },
@@ -141,3 +142,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Static version for cache-busting template assets (e.g., logo)
 STATIC_VERSION = '7'
+
+# 單資料庫模式：不使用 Router
+DATABASE_ROUTERS = []
+
+# 是否啟用雲端人臉 API 同步（設為 False 則完全使用本地資料庫）
+CLOUD_SYNC_ENABLED = False
