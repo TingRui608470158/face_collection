@@ -30,7 +30,7 @@
         <canvas id="canvas" style="display:none"></canvas>
         <div class="d-flex align-items-center gap-2 mb-2">
           <button id="start" class="btn btn-primary">開始收集（約 5 秒）</button>
-          <a id="back" class="btn btn-outline-secondary" href="{% url 'name_role_form' %}">上一步</a>
+          <a id="back" class="btn btn-outline-secondary" href="{% url 'name_role_form' %}?reset=1">上一步</a>
           <a id="next" class="btn btn-success" href="{% url 'select_image' %}" disabled>下一步</a>
           <span id="countdown" class="text-muted ms-auto">尚未開始</span>
         </div>
@@ -272,6 +272,10 @@
     }
     setSource('camera');
     window.addEventListener('beforeunload', () => { if (timer) clearInterval(timer); });
+    // 返回上一頁時清除暫存影像
+    document.getElementById('back').addEventListener('click', () => {
+      try { sessionStorage.removeItem('collector:frames'); } catch (_) {}
+    });
   </script>
 {% endblock %}
 

@@ -12,9 +12,10 @@ import numpy as np
 import hashlib
 import logging
 from datetime import timezone as dt_timezone, timedelta
+import mimetypes
 
 from .forms import NameRoleForm
-from .models import Profile, Capture
+from .models import Profile, Capture, Company
 from django.conf import settings
 from .cloud_api import client as cloud
 from scripts.insight_utils import has_face_features
@@ -24,6 +25,14 @@ from scripts.insight_utils import has_face_features
 def name_role_form(request: HttpRequest):
     if not request.user.is_authenticated:
         return redirect('login')
+
+    # 若帶 reset=1，清除先前暫存的作業狀態
+    if request.GET.get('reset') == '1':
+        for k in ['profile_id', 'batch_id', 'employee_id', 'visitor_index']:
+            try:
+                request.session.pop(k, None)
+            except Exception:
+                pass
 
     # 清理過期訪客（每日）— 若資料表尚未建立或租戶 DB 尚未初始化，避免阻斷流程
     try:
@@ -502,6 +511,124 @@ def console_visitor_detail(request: HttpRequest, visitor_index: str):
                 'active_tab': 'visitors',
             },
         )
+
+
+# --- Company-scoped read-only APIs ---
+
+def _get_company_by_name_or_404(company_name: str) -> Company:
+    try:
+        return Company.objects.get(name=company_name)
+    except Company.DoesNotExist:
+        raise Exception('not-found')
+
+
+def api_employees(request: HttpRequest, company_name: str):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'method-not-allowed'}, status=405)
+    try:
+        company = _get_company_by_name_or_404(company_name)
+        skip = int(request.GET.get('skip', '0') or '0')
+        limit = int(request.GET.get('limit', '50') or '50')
+        # 僅列出已完成（有代表照）的對象
+        qs = (
+            Profile.objects
+            .filter(company=company, role=Profile.ROLE_EMPLOYEE, captures__selected=True)
+            .order_by('-created_at')
+            .distinct()
+        )
+        items = [
+            {
+                'id': p.id,
+                'name': p.name,
+                'created_at': p.created_at.isoformat(),
+            }
+            for p in qs[skip:skip+limit]
+        ]
+        return JsonResponse({'total': qs.count(), 'items': items})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=404)
+
+
+def api_employee_detail(request: HttpRequest, company_name: str, employee_id: int):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'method-not-allowed'}, status=405)
+    try:
+        company = _get_company_by_name_or_404(company_name)
+        p = Profile.objects.get(company=company, role=Profile.ROLE_EMPLOYEE, id=employee_id)
+        cap = Capture.objects.filter(profile=p, selected=True).first()
+        if not cap:
+            return JsonResponse({'error': 'not-completed'}, status=404)
+        data = {
+            'id': p.id,
+            'name': p.name,
+            'image': _imagefile_to_data_url(cap.image) if (cap and getattr(cap.image, 'name', None)) else None,
+            'created_at': p.created_at.isoformat(),
+        }
+        return JsonResponse(data)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=404)
+
+
+def api_visitors(request: HttpRequest, company_name: str):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'method-not-allowed'}, status=405)
+    try:
+        company = _get_company_by_name_or_404(company_name)
+        skip = int(request.GET.get('skip', '0') or '0')
+        limit = int(request.GET.get('limit', '50') or '50')
+        # 僅列出已完成（有代表照）的對象
+        qs = (
+            Profile.objects
+            .filter(company=company, role=Profile.ROLE_VISITOR, captures__selected=True)
+            .order_by('-created_at')
+            .distinct()
+        )
+        items = [
+            {
+                'id': p.id,
+                'name': p.name,
+                'created_at': p.created_at.isoformat(),
+            }
+            for p in qs[skip:skip+limit]
+        ]
+        return JsonResponse({'total': qs.count(), 'items': items})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=404)
+
+
+def api_visitor_detail(request: HttpRequest, company_name: str, visitor_id: int):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'method-not-allowed'}, status=405)
+    try:
+        company = _get_company_by_name_or_404(company_name)
+        p = Profile.objects.get(company=company, role=Profile.ROLE_VISITOR, id=visitor_id)
+        cap = Capture.objects.filter(profile=p, selected=True).first()
+        if not cap:
+            return JsonResponse({'error': 'not-completed'}, status=404)
+        data = {
+            'id': p.id,
+            'name': p.name,
+            'image': _imagefile_to_data_url(cap.image) if (cap and getattr(cap.image, 'name', None)) else None,
+            'created_at': p.created_at.isoformat(),
+        }
+        return JsonResponse(data)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=404)
+
+
+def _imagefile_to_data_url(file_field) -> str | None:
+    try:
+        path = getattr(file_field, 'path', None)
+        if not path:
+            return None
+        with open(path, 'rb') as f:
+            binary = f.read()
+        mime, _ = mimetypes.guess_type(getattr(file_field, 'name', '') or path)
+        mime = mime or 'image/jpeg'
+        b64 = base64.b64encode(binary).decode('utf-8')
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
     else:
         error = None
         image_src = None

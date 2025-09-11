@@ -18,6 +18,11 @@ urlpatterns = [
     path('console/visitors/create/', views.console_visitor_create, name='console_visitor_create'),
     path('console/visitors/<str:visitor_index>/', views.console_visitor_detail, name='console_visitor_detail'),
     path('console/visitors/delete/<str:visitor_index>/', views.console_visitor_delete, name='console_visitor_delete'),
+    # Company-scoped public APIs (read-only)
+    path('api/<str:company_name>/employees/', views.api_employees, name='api_employees'),
+    path('api/<str:company_name>/employees/<int:employee_id>/', views.api_employee_detail, name='api_employee_detail'),
+    path('api/<str:company_name>/visitors/', views.api_visitors, name='api_visitors'),
+    path('api/<str:company_name>/visitors/<int:visitor_id>/', views.api_visitor_detail, name='api_visitor_detail'),
 ]
 
 
