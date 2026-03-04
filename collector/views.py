@@ -548,6 +548,35 @@ def console_visitor_detail(request: HttpRequest, visitor_index: str):
                 'active_tab': 'visitors',
             },
         )
+    else:
+        # CLOUD_SYNC_ENABLED=False：從本地資料庫讀取訪客資料
+        item = None
+        error = None
+        image_src = None
+        has_face = False
+        try:
+            pid = int(visitor_index)
+            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
+            p = Profile.objects.get(id=pid, role=Profile.ROLE_VISITOR, company=user_company)
+            cap = Capture.objects.filter(profile=p, selected=True).first() or Capture.objects.filter(profile=p).order_by('-created_at').first()
+            if cap and getattr(cap.image, 'url', None):
+                image_src = cap.image.url
+                has_face = True
+            item = {'name': p.name}
+        except Exception as e:
+            item = None
+            error = str(e)
+        return render(
+            request,
+            'collector/console_visitor_detail.html',
+            {
+                'item': item,
+                'image_src': image_src,
+                'has_face': has_face,
+                'error': error,
+                'active_tab': 'visitors',
+            },
+        )
 
 
 # --- Company-scoped read-only APIs ---
@@ -666,31 +695,4 @@ def _imagefile_to_data_url(file_field) -> str | None:
         return f"data:{mime};base64,{b64}"
     except Exception:
         return None
-    else:
-        error = None
-        image_src = None
-        has_face = False
-        try:
-            pid = int(visitor_index)
-            user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
-            p = Profile.objects.get(id=pid, role=Profile.ROLE_VISITOR, company=user_company)
-            cap = Capture.objects.filter(profile=p, selected=True).first() or Capture.objects.filter(profile=p).order_by('-created_at').first()
-            if cap and getattr(cap.image, 'url', None):
-                image_src = cap.image.url
-                has_face = True
-            item = {'name': p.name}
-        except Exception as e:
-            item = None
-            error = str(e)
-        return render(
-            request,
-            'collector/console_visitor_detail.html',
-            {
-                'item': item,
-                'image_src': image_src,
-                'has_face': has_face,
-                'error': error,
-                'active_tab': 'visitors',
-            },
-        )
 
