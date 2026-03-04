@@ -47,10 +47,21 @@ def name_role_form(request: HttpRequest):
             # 單資料庫模式：依使用者所屬公司建立 Profile
             user_company = None
             try:
-                user_company = getattr(getattr(request.user, 'account_profile', None), 'company', None)
-            except Exception:
+                account_profile = getattr(request.user, 'account_profile', None)
+                if account_profile:
+                    user_company = account_profile.company
+            except Exception as e:
+                logging.warning(f'無法取得使用者公司資訊: {e}')
                 user_company = None
+            
+            # 確保有取得公司資訊
+            if not user_company:
+                logging.error(f'使用者 {request.user.username} 沒有關聯的公司，無法建立 Profile')
+                form.add_error(None, '您的帳號尚未關聯到公司，請聯絡管理員')
+                return render(request, 'collector/name_role_form.html', {'form': form, 'active_tab': 'collect'})
+            
             profile = form.save_profile(company=user_company)
+            logging.info(f'已為公司 {user_company.name} 建立 Profile: {profile.name} ({profile.role})')
             request.session['profile_id'] = profile.id
             request.session['batch_id'] = uuid.uuid4().hex
             # 若為員工，暫存雲端所需欄位以便 finalize 上傳
@@ -325,12 +336,25 @@ def console_employees(request: HttpRequest):
 def console_employee_create(request: HttpRequest):
     if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
         return redirect('console_employees')
+    # 取得使用者所屬公司
+    user_company = None
+    try:
+        account_profile = getattr(request.user, 'account_profile', None)
+        if account_profile:
+            user_company = account_profile.company
+    except Exception:
+        user_company = None
+    
+    if not user_company:
+        return render(request, 'collector/console_employee_create.html', {'error': '您的帳號尚未關聯到公司，請聯絡管理員'})
+    
     if request.method == 'POST':
         name = (request.POST.get('name') or '').strip()
         emp_id = (request.POST.get('employee_id') or '').strip()
         if not name or not emp_id:
             return render(request, 'collector/console_employee_create.html', {'error': '姓名與員工編號必填'})
-        p = Profile.objects.create(name=name, role=Profile.ROLE_EMPLOYEE)
+        p = Profile.objects.create(name=name, role=Profile.ROLE_EMPLOYEE, company=user_company)
+        logging.info(f'已為公司 {user_company.name} 建立員工 Profile: {p.name}')
         return redirect('console_employees')
     return render(request, 'collector/console_employee_create.html')
 
@@ -437,6 +461,18 @@ def console_visitors(request: HttpRequest):
 def console_visitor_create(request: HttpRequest):
     if getattr(settings, 'CLOUD_SYNC_ENABLED', True):
         return redirect('console_visitors')
+    # 取得使用者所屬公司
+    user_company = None
+    try:
+        account_profile = getattr(request.user, 'account_profile', None)
+        if account_profile:
+            user_company = account_profile.company
+    except Exception:
+        user_company = None
+    
+    if not user_company:
+        return render(request, 'collector/console_visitor_create.html', {'error': '您的帳號尚未關聯到公司，請聯絡管理員'})
+    
     if request.method == 'POST':
         name = (request.POST.get('name') or '').strip()
         if not name:
@@ -444,7 +480,8 @@ def console_visitor_create(request: HttpRequest):
         # 設定當天到期
         now = timezone.now()
         end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        Profile.objects.create(name=name, role=Profile.ROLE_VISITOR, expires_at=end_of_day)
+        p = Profile.objects.create(name=name, role=Profile.ROLE_VISITOR, expires_at=end_of_day, company=user_company)
+        logging.info(f'已為公司 {user_company.name} 建立訪客 Profile: {p.name}')
         return redirect('console_visitors')
     return render(request, 'collector/console_visitor_create.html')
 
